@@ -1,6 +1,6 @@
 # Urja Meter Ops API
 
-The Urja Meter Ops portal is an old web app that people use in a browser. It has no API, so a program can't easily ask it for data. This project is a small service that sits in front of the portal and gives programs a simple way to ask.
+ This project is a small service that sits in front of the portal and gives programs a simple way to ask.
 
 Under the hood, the service does what a person would do: it logs in, clicks around (by calling the same hidden URLs the pages call), and collects the data. It then hands that data back as normal JSON.
 
@@ -10,12 +10,11 @@ This is my submission for the Flock Energy take-home.
 
 | If you want to... | Read |
 |---|---|
-| Run it | "Run it in 2 minutes" below |
 | Understand how the portal behaves (login, URLs, odd data) | [PROTOCOL.md](./PROTOCOL.md) |
 | See the exact shape of my API | [openapi.json](./openapi.json) (paste it into editor.swagger.io to browse it) |
 | Read my answers to the reflection questions | [REFLECTION.md](./REFLECTION.md) |
 
-## Run it in 2 minutes
+## Usage Guide
 
 You need **Node 20.6 or newer**.
 
@@ -38,8 +37,6 @@ The service is now on `http://localhost:3000`. Try it:
 curl http://localhost:3000/api/meters/J100006
 ```
 
-You should get back one meter with its details, its place in the network, its location and its energy data (see "Sample response" below).
-
 ## What you can ask it
 
 | Request | What you get |
@@ -49,7 +46,7 @@ You should get back one meter with its details, its place in the network, its lo
 | `GET /api/meters/{id}` | Everything about one meter: details, network position, location, energy |
 | `GET /api/transformers` | Every transformer, in one list |
 
-The portal gives lists 20 at a time, spread over many pages. This service hides that: it reads every page for you and returns one combined list.
+The portal lists 20 at a time, spread over many pages. This service hides that : it reads every page for you and returns one combined list.
 
 When something goes wrong, the error always has the same shape, so a caller only needs to handle one format:
 
@@ -93,7 +90,7 @@ When something goes wrong, the error always has the same shape, so a caller only
 }
 ```
 
-`hierarchy` reads top to bottom: this meter hangs off transformer (DT) 7, which hangs off feeder 7, and so on up to the zone.
+`hierarchy` shows where the meter sits in the power network, from the biggest area (Zone) down to the transformer (DT) it is connected to.
 
 ## How the code is organised
 
@@ -105,18 +102,16 @@ transformers-service.js   Transformer logic: the list.
 openapi.json              Description of this API.
 ```
 
-The idea is that the code has layers:
+Layered Structure:
 
 ```
   caller  ->  server.js  ->  *-service.js  ->  portal-client.js  ->  the portal
- (curl)      (URLs, errors)  (what to ask for)  (login, cookies)
+  (curl)     (URLs, errors)  (what to ask for)  (login, cookies)
 ```
 
 - `portal-client.js` only knows how to get through the portal's door.
 - The `*-service.js` files only know which pages to ask for and how to tidy the answer.
 - `server.js` only knows about HTTP.
-
-So if the portal's login changes, you touch one file. If you want a new endpoint, you add a function in a service file and a route in `server.js`.
 
 ## How the automatic login works
 
@@ -124,30 +119,15 @@ So if the portal's login changes, you touch one file. If you want a new endpoint
 2. Every later request sends that cookie.
 3. If a response looks like "you're logged out", the client logs in again and retries the request **once**. It retries only once so wrong credentials can't cause an endless loop.
 4. If many requests arrive while the session is expired, only one login happens and the others wait for it.
-
-The "does this look logged out?" check is the function `looksExpired()` in `portal-client.js`. **It is a best guess** (see "Things I haven't verified").
-
-## If something breaks
-
-| What you see | Likely cause | Where to look |
-|---|---|---|
-| `PORTAL_LOGIN_FAILED` | Wrong or missing email/password in `.env` | `.env`, then the login function in `portal-client.js` |
-| Login works but every call returns an error | The portal changed how an expired or invalid session looks | `looksExpired()` in `portal-client.js` |
-| `/api/meters/{id}` returns `null` for `attributes` and `hierarchy` | The portal's page-data format changed | `fetchMeterPageData()` and `unflatten()` in `meters-service.js` |
-| `/api/meters` returns fewer meters than expected | The portal's paging changed (page size, numbering) | `fetchAllMeters()` in `meters-service.js` |
-| Requests are slow | `/api/meters` makes about 21 portal calls every time and there is no caching | See "Next steps" |
-
+   
 ## Assumptions I made
 
-I wrote these down because I couldn't confirm all of them:
-
-- Page numbers start at 1.
 - The transformer list answers in the same shape as the meter list (`data`, `total`, `pageSize`).
 - A logged-out session shows up as a 401/403, or a redirect to `/login`, or the portal's JSON version of that redirect.
 - One shared portal login is fine for everyone, because this service only reads data.
 - If a meter has some parts but not others (say a location but no energy), it's better to return what exists, with `null` for the missing part, than to fail the whole request. A meter is "not found" only if the portal has nothing at all for it.
 
-## Choices I made, and what they cost
+## Design decisions & trade-offs
 
 - **Log in only when needed, retry once.** Simple, and I didn't have to guess how long a session lasts. The cost is one slower request when a session expires.
 - **Read pages one at a time, not in parallel.** The portal is an old system and I didn't want to hit it hard. The cost is speed.
@@ -159,7 +139,7 @@ I wrote these down because I couldn't confirm all of them:
 
 ## What I left out on purpose
 
-- **Automated tests.** The first thing I'd add (see below).
+- **Automated tests.** The first thing I'd add:
 - **Caching.** Each `/api/meters` call goes to the portal about 21 times.
 - **Cleaning up the data.** Location and energy are passed through as the portal sends them. Labels like `"Serial No"` and values like `"Sanganer DT 7 (DT-007)"` are kept as they are.
 - **The hierarchy as a tree**, and linking meters to transformers using `dtCode`.
@@ -176,16 +156,6 @@ I wrote these down because I couldn't confirm all of them:
 5. Add timeouts and a short wait before retrying.
 6. Add a transformer endpoint that includes its meters, and show the hierarchy as a tree.
 
-## Things I haven't verified
-
-Rather than hide these, here they are in one place. Details are in [PROTOCOL.md](./PROTOCOL.md).
-
-- How long a session lasts, and exactly what an expired session looks like.
-- Whether page 1 is really the first page, and what happens for a page past the end.
-- What the search text actually matches (meter ID? serial number? make?).
-- The exact shape of the transformer, location and energy responses.
-- Whether `total` changes when a search is applied.
-
-## How I used AI help
+## AI Assistance
 
 I used an AI assistant to explain ideas I didn't know (CSRF protection, cookies, the portal's page-data format), to talk through my approach, and to help draft code and these documents. I did the exploring in the browser myself and checked the portal's requests and responses myself.
