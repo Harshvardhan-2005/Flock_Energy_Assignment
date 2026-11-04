@@ -1,0 +1,206 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Urja Meter Ops API",
+    "version": "1.0.0",
+    "description": "A clean, read-only API in front of the legacy Urja Meter Ops portal. The service logs in to the portal by itself and combines the portal's paginated lists into single responses."
+  },
+  "servers": [
+    { "url": "http://localhost:3000", "description": "Local" }
+  ],
+  "paths": {
+    "/api/meters": {
+      "get": {
+        "summary": "List all meters",
+        "description": "Fetches every page of the portal's meter list and returns them combined. Makes one portal request per page (about 21), so it is slow.",
+        "operationId": "listMeters",
+        "responses": {
+          "200": {
+            "description": "All meters.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MeterList" } } }
+          },
+          "502": { "$ref": "#/components/responses/PortalError" }
+        }
+      }
+    },
+    "/api/meters/search": {
+      "get": {
+        "summary": "Search meters",
+        "description": "Same as listing, but passes the query to the portal's search. Which fields the portal searches is described in PROTOCOL.md.",
+        "operationId": "searchMeters",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search text.",
+            "schema": { "type": "string", "minLength": 1 },
+            "example": "J1000"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Matching meters.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MeterSearchResult" } } }
+          },
+          "400": {
+            "description": "The q parameter is missing or empty.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": { "$ref": "#/components/responses/PortalError" }
+        }
+      }
+    },
+    "/api/meters/{id}": {
+      "get": {
+        "summary": "Get one meter's details",
+        "description": "Combines the portal's meter attributes, network hierarchy, location and energy data, which the original portal shows on a single page. Makes three portal requests.",
+        "operationId": "getMeter",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Meter ID.",
+            "schema": { "type": "string" },
+            "example": "J100006"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The meter. Any part the portal had no data for is null.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MeterDetails" } } }
+          },
+          "404": {
+            "description": "The portal does not know this meter.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "502": { "$ref": "#/components/responses/PortalError" }
+        }
+      }
+    },
+    "/api/transformers": {
+      "get": {
+        "summary": "List all transformers",
+        "description": "Fetches every page of the portal's transformer (DT) list and returns them combined. The record fields are passed through from the portal.",
+        "operationId": "listTransformers",
+        "responses": {
+          "200": {
+            "description": "All transformers.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TransformerList" } } }
+          },
+          "502": { "$ref": "#/components/responses/PortalError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "PortalError": {
+        "description": "The portal could not be reached, login failed, or it returned an unexpected status.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": ["MISSING_QUERY", "METER_NOT_FOUND", "PORTAL_UNAVAILABLE", "PORTAL_LOGIN_FAILED"]
+              },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+      "Meter": {
+        "type": "object",
+        "properties": {
+          "meterId": { "type": "string", "example": "J100020" },
+          "serialNo": { "type": "string", "example": "AL20290" },
+          "make": { "type": "string", "example": "Allied" },
+          "phaseType": { "type": "string", "example": "three" },
+          "installStatus": { "type": "string", "example": "Installed" },
+          "dtCode": { "type": "string", "description": "Code of the transformer the meter is connected to.", "example": "DT-021" }
+        }
+      },
+      "MeterList": {
+        "type": "object",
+        "properties": {
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/Meter" } },
+          "total": { "type": "integer", "example": 403 }
+        }
+      },
+      "MeterSearchResult": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "example": "J1000" },
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/Meter" } },
+          "total": { "type": "integer" }
+        }
+      },
+      "MeterDetails": {
+        "type": "object",
+        "properties": {
+          "meterId": { "type": "string", "example": "J100006" },
+          "attributes": {
+            "type": "object",
+            "nullable": true,
+            "description": "Meter attributes keyed by the portal's display labels.",
+            "additionalProperties": { "type": "string" },
+            "example": {
+              "Meter ID": "J100006",
+              "Serial No": "SE35634",
+              "Make": "HPL",
+              "Phase Type": "single",
+              "Installation Status": "Decommissioned",
+              "Installation Type": "Whole Current"
+            }
+          },
+          "hierarchy": {
+            "type": "object",
+            "nullable": true,
+            "description": "Network hierarchy, top to bottom. Each value is \"<name> (<code>)\".",
+            "properties": {
+              "Zone": { "type": "string", "example": "Jaipur Zone 1 (Z-01)" },
+              "Circle": { "type": "string", "example": "Circle 1 (C-01)" },
+              "Division": { "type": "string", "example": "Division 7 (D-07)" },
+              "Subdivision": { "type": "string", "example": "Subdivision 7 (SD-07)" },
+              "Sub Station": { "type": "string", "example": "Substation 7 (SS-07)" },
+              "Feeder": { "type": "string", "example": "Feeder 7 (F-007)" },
+              "DT": { "type": "string", "example": "Sanganer DT 7 (DT-007)" }
+            }
+          },
+          "geo": {
+            "type": "object",
+            "nullable": true,
+            "description": "Location data exactly as the portal returns it. Fields are not yet documented.",
+            "additionalProperties": true
+          },
+          "energy": {
+            "type": "object",
+            "nullable": true,
+            "description": "Energy data exactly as the portal returns it. Fields are not yet documented.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "TransformerList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": true }
+          },
+          "total": { "type": "integer" }
+        }
+      }
+    }
+  }
+}
