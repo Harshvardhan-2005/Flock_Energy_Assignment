@@ -1,75 +1,75 @@
-# How the Urja portal works (PROTOCOL.md)
+# Urja Meter Ops
 
-This is what I learned about the portal by using it in Chrome, watching the Network tab in DevTools, copying requests as cURL, and replaying them with curl and Postman.
+> Notes from reverse-engineering the Urja Meter Ops portal so the API in this repo can talk to it. Everything below was observed in Chrome DevTools (Network tab) and replayed with curl and Postman. Anything I did not test is listed in section 5, not stated as fact.
 
-If you're picking this project up, read this file before changing `portal-client.js` or the service files. It explains why they do what they do.
+Read this before changing `portal-client.js` or the service files.
 
-**How to read the labels**
+## At a glance
 
-- **Seen:** I saw this myself in a real request or response.
-- **Guess:** I think this is true but didn't confirm it.
-- **To check:** I know I haven't looked at this yet.
+| | |
+|---|---|
+| **Framework** | SvelteKit web app (login uses the `x-sveltekit-action` header and returns a JSON redirect) |
+| **Auth** | Session cookie `__Secure-better-auth.session_token` |
+| **Session lifetime** | 3600 seconds (`Max-Age=3600`) |
+| **Cookie flags** | `HttpOnly; Secure; SameSite=Lax; Path=/` |
+| **Login** | `POST /login`, form-encoded. Replies HTTP 200 with a JSON redirect body |
+| **Data sources** | JSON endpoints under `/portal/...`, plus SvelteKit's `__data.json` page data |
+| **Size** | 403 meters, 20 per page |
 
-Section 6 collects everything I haven't confirmed.
+## 1. Authentication
 
-## 1. The short version
+### Login request
 
-- The portal is a **SvelteKit** web app. (Seen: the login request has a header `x-sveltekit-action`, and its answer is JSON like `{"type":"redirect",...}`.)
-- Login uses a library called **Better Auth**. (Seen: that's the name of the session cookie.)
-- There is no official API. But the portal's own pages fetch their data from hidden JSON URLs under `/portal/...`, and SvelteKit also exposes each page's data at a `__data.json` URL. Once you have a session cookie, you can call all of these yourself.
-
-## 2. Logging in
-
-### The request (Seen)
-
-```
+```text
 POST https://urja-ops.flockenergy.tech/login
-content-type: application/x-www-form-urlencoded
 accept: application/json
+content-type: application/x-www-form-urlencoded
 origin: https://urja-ops.flockenergy.tech
 referer: https://urja-ops.flockenergy.tech/login
 x-sveltekit-action: true
 
-email=operator%40urja.local&password=<password>
+email=<email>&password=<password>
 ```
 
-On success the body is:
+### Login response
+
+HTTP status **200**, `Content-Type: application/json`, `Content-Length: 53`. Body:
 
 ```json
 {"type":"redirect","status":303,"location":"/meters"}
 ```
 
-and the response also carries a `Set-Cookie` header with the session cookie. That cookie is what proves you're logged in.
+The `303` is inside the JSON body. The real HTTP status is 200. The session cookie arrives in `Set-Cookie`:
 
-- Cookie name: `__Secure-better-auth.session_token` (Seen)
-- Its value looks like `<token>.<signature>`, URL-encoded. I send it back exactly as I received it. (Seen)
-- No earlier page visit, no CSRF token and no starting cookie were needed. A single POST was enough. (Seen)
+```text
+__Secure-better-auth.session_token=<token>.<signature>; Max-Age=3600; Path=/; HttpOnly; Secure; SameSite=Lax
+```
 
-### The "Cross-site POST form submissions are forbidden" error (Seen)
+The value is `<token>.<signature>`, URL-encoded (it ends in `%3D`). The code sends it back exactly as received.
 
-My first login attempt from Postman failed with this message. It comes from SvelteKit's built-in protection against forged form submissions. My understanding (Guess) is that SvelteKit rejects form-style POSTs when the `Origin` header is missing or isn't the portal's own address. Browsers add `Origin` automatically. Postman doesn't. Adding `Origin: https://urja-ops.flockenergy.tech` fixed it.
+### What I found out while getting login to work
 
-I did not run the follow-up experiment of removing `Origin` from the working request to prove it's the only thing that matters. So `portal-client.js` sends `Origin`, `Referer` and `x-sveltekit-action`, just like the browser did.
+- No earlier page visit and no CSRF token were needed. One POST was enough.
+- My first attempt from Postman failed with the message **"Cross-site POST form submissions are forbidden"**.
+- The request copied from Chrome ("Copy as cURL") and run in the terminal succeeded.
+- `portal-client.js` sends `origin`, `referer`, `accept`, `content-type` and `x-sveltekit-action`, and login works with those.
+- I did **not** test which of those headers is the one that matters. SvelteKit documents a built-in check that rejects cross-site form POSTs by looking at `Origin`, and Postman does not send `Origin` by default, but I have not proven that this is what happened here.
 
-### Using the session (Seen)
+### Using the session
 
-Every later request sends the cookie: `Cookie: __Secure-better-auth.session_token=...`. The other browser headers (`user-agent`, `sec-ch-ua`, and so on) didn't seem to be needed (Guess).
+Every request after login sends `Cookie: __Secure-better-auth.session_token=...`. The service stores the cookie in memory only.
 
-### When the session ends (To check)
+## 2. Endpoints
 
-I don't know how long a session lasts, or what the portal sends when a session has expired. `looksExpired()` in `portal-client.js` assumes it's one of these:
+All are `GET` and need the session cookie.
 
-1. HTTP status 401 or 403
-2. a redirect to `/login`
-3. JSON like `{"type":"redirect","location":"/login"}`
+### 2.1 Meter list
 
-To find out for sure: log in, change a few characters of the cookie, call `/portal/meters/search?q=&page=1`, and write down exactly what comes back. Then update `looksExpired()` and this section. Also check the cookie's `Max-Age` or `Expires` in the login response to learn the session length.
+```text
+GET /portal/meters/search?q=<text>&page=<n>
+```
 
-## 3. The URLs
-
-All are `GET`, and all need the session cookie.
-
-### 3.1 Meter list: `/portal/meters/search?q=<text>&page=<n>` (Seen)
+Response (second page, shortened to one record):
 
 ```json
 {
@@ -83,39 +83,61 @@ All are `GET`, and all need the session cookie.
 }
 ```
 
-- There were 403 meters, 20 per page, so 21 pages. The page count is `ceil(total / pageSize)`.
-- An empty `q` (`q=`) returns everything.
-- `dtCode` says which transformer the meter belongs to. It links to the transformer list.
+- The portal UI loads its first list page with `q=` (empty) and `page=1`.
+- `page=2` returns a body with `"page": 2`.
+- `total` was 403 and `pageSize` 20, so there are 21 pages (403 / 20, rounded up).
+- The portal's search box reads "Search by meter number or serial...".
 
-To check: is `page` counted from 1? What do `page=0` and `page=22` return? Which fields does `q` search? Does `total` become the filtered count when `q` is set? Can the page size be changed with a parameter?
+### 2.2 Transformer list
 
-### 3.2 Transformer list: `/portal/dts?page=<n>` (request Seen, response shape Guess)
-
-The portal's transformer page has no search box, so there's no `q`. I assumed the answer has the same `data` / `total` / `page` / `pageSize` shape as the meter list. To check: confirm that, and write down what a transformer record contains.
-
-### 3.3 Meter location: `/portal/meters/<meterId>/geo` (request Seen)
-
-The meter's detail page calls this. To check: paste a sample response here. Are the coordinates numbers or text? Can they be empty?
-
-### 3.4 Meter energy: `/portal/meters/<meterId>/energy` (request Seen)
-
-The meter's detail page calls this too. To check: paste a sample response here, and note the units, the date format, and whether it accepts a date range.
-
-### 3.5 The meter page's own data: `/meters/<meterId>/__data.json?x-sveltekit-invalidated=001` (Seen)
-
-This is SvelteKit's hidden data route for the meter detail page. It is the **only place I found the network hierarchy** (zone, circle, division and so on).
-
-It looks like this:
-
-```json
-{ "type": "data", "nodes": [ {"type":"skip"}, {"type":"skip"}, {"type":"data","data":[ ... ]} ] }
+```text
+GET /portal/dts?page=<n>
 ```
 
-- The first nodes are shared page layouts, which come back as `skip`. (My understanding is that `x-sveltekit-invalidated=001` tells SvelteKit that the layouts haven't changed. Guess.)
-- The meter's own data is in the **last** node of type `data`. That's the one the code reads.
-- The `data` list uses an unusual format; see section 4.
+- Request URL observed from the portal's Transformers page. It has no search box.
+- The service code reads `data`, `total` and `pageSize` from the response.
+- The fields of a transformer record are **not documented here yet**.
 
-Once decoded, it holds the meter's attributes and its hierarchy. For meter `J100006`:
+### 2.3 Meter location
+
+```text
+GET /portal/meters/<meterId>/geo
+```
+
+Called by the meter detail page. The response fields are **not documented here yet**.
+
+### 2.4 Meter energy
+
+```text
+GET /portal/meters/<meterId>/energy
+```
+
+Called by the meter detail page. The response fields are **not documented here yet**.
+
+### 2.5 Meter page data (attributes and hierarchy)
+
+```text
+GET /meters/<meterId>/__data.json?x-sveltekit-invalidated=001
+```
+
+The browser sends this when you open a meter. It is the only place where I found the network hierarchy.
+
+```json
+{
+  "type": "data",
+  "nodes": [
+    { "type": "skip" },
+    { "type": "skip" },
+    { "type": "data", "data": [ "..." ] }
+  ]
+}
+```
+
+- The first two nodes were `skip`. The meter's data was in the third node, which is the last one of type `data`. That is the node the code reads.
+- The `data` list uses the format in section 3.
+- I have not tested the URL without `?x-sveltekit-invalidated=001`.
+
+Decoded for meter `J100006`:
 
 ```json
 {
@@ -143,45 +165,41 @@ Once decoded, it holds the meter's attributes and its hierarchy. For meter `J100
 }
 ```
 
-The network runs from the top down like this: **Zone > Circle > Division > Subdivision > Sub Station > Feeder > DT (transformer) > Meter**. Each level is written as `"<name> (<code>)"`, and the code (like `DT-007`) is what matches records elsewhere, for example `dtCode` in the meter list.
+The hierarchy fields appear in this order: Zone, Circle, Division, Subdivision, Sub Station, Feeder, DT. Each value is written as `"<name> (<code>)"`.
 
-To check: does the page still work without `?x-sveltekit-invalidated=001`? What comes back for a meter that doesn't exist?
+## 3. The page-data format
 
-## 4. The odd data format (Seen)
+SvelteKit sends page data as one flat list. Index 0 is the root. Objects and lists refer to their values by **position in the list** instead of containing them.
 
-Page data from SvelteKit doesn't look like normal JSON. It's one flat list where **every value is written once, and objects refer to their values by position** instead of containing them. SvelteKit calls this format "devalue".
-
-A tiny example, based on the data above:
-
-```
-position 0:  { "meterId": 1, "detail": 2 }     <- the root: meterId is at position 1, detail is at 2
-position 1:  "J100006"                           <- so meterId = "J100006"
-position 2:  { "data": 3 }                       <- detail.data is at position 3
-position 3:  [ 4, 6, 9, ... ]                    <- a list whose items are at positions 4, 6, 9...
+```text
+position 0:  { "meterId": 1, "detail": 2, "hierarchy": 21 }
+position 1:  "J100006"
+position 2:  { "data": 3 }
+position 3:  [ 4, 6, 9, 12, 15, 18 ]
+...
 ```
 
-Follow the positions and you get the normal nested object back. That's all `unflatten()` in `meters-service.js` does.
+`meterId` is whatever is at position 1, so `"J100006"`. Following the positions rebuilds the normal nested object. `unflatten()` in `meter-service.js` does exactly this. It handles objects, lists, strings, numbers, `null`, `undefined` and `NaN`. It does not handle any other special types, because none appeared in the data I saw.
 
-Limits of my version: it handles objects, lists, text, numbers, `null`, `undefined` and `NaN`. The real format can also hold dates and other special types. I didn't see any, so I didn't handle them. If the portal starts sending one, `unflatten()` is where it would go wrong.
+## 4. Things I observed in the data
 
-## 5. Quirks and surprises
+- **Three install statuses** appear in the meter list: `Installed`, `Decommissioned`, `Faulty`.
+- **Makes seen** in the first rows: HPL, L&T, Genus, Allied, Secure. **Phase types seen:** `single`, `three`.
+- **A decommissioned meter still has a full hierarchy** (`J100006`).
+- **The hierarchy repeats three fields** already in the attributes: Meter ID, Installation Status, Installation Type. The service drops those three from `hierarchy`.
+- **Names and codes share one string**, for example `"Sanganer DT 7 (DT-007)"`.
+- **The list and the detail page name the same things differently**: `serialNo` and `installStatus` in the list, `"Serial No"` and `"Installation Status"` in the detail page.
+- **DT codes line up between the two sources for `J100006`:** `dtCode` is `DT-007` in the list and the hierarchy's `DT` ends in `(DT-007)`.
+- **In the first 19 rows of the list** (`J100000` to `J100018`) every meter has a different DT code, `DT-001` to `DT-019`.
 
-- **The hierarchy only exists in `__data.json`.** None of the clean `/portal/...` JSON URLs I found carry it.
-- **The hierarchy repeats things.** It includes Meter ID, Installation Status and Installation Type, which are already in the attributes. My code drops those three from `hierarchy`.
-- **Names and codes are stuck together.** `"Sanganer DT 7 (DT-007)"` is one string, so getting the code out means splitting it.
-- **The same thing has different names in different places.** The list uses `serialNo` and `installStatus`; the detail page uses `"Serial No"` and `"Installation Status"`. The detail page's names are display labels, not stable field names.
-- **Decommissioned meters are still listed** and still have a full hierarchy, so "installed" isn't something you can assume.
-- **Two kinds of "no".** The cross-site error is plain text, but a successful login is JSON. Don't assume every failure is JSON.
-- **To check:** whether the data contradicts itself, such as meters whose `dtCode` matches no transformer, transformers with no meters, or meters missing hierarchy levels. I haven't compared them yet.
+## 5. Not tested yet
 
-## 6. What I haven't verified
-
-1. How long a session lasts and what an expired one looks like.
-2. Whether `Origin` is the only header the login really needs.
-3. Page numbering (starts at 1?), what comes after the last page, and what `q` matches.
-4. Whether `total` changes under a search, and whether page size can be changed.
-5. The response shapes for transformers, location and energy.
-6. What the portal returns for a meter that doesn't exist.
-7. Whether `__data.json` works without `?x-sveltekit-invalidated=001`.
-8. Whether any other page has an export or "everything at once" URL.
-9. Rate limits. I kept my request count low and never tested them.
+1. What the portal returns when the session has expired. `looksExpired()` in `portal-client.js` checks for a 401/403, a redirect to `/login`, or a JSON redirect to `/login`. I have not seen what the portal actually sends.
+2. What a wrong password returns.
+3. Which header the login actually needs (see section 1).
+4. What the meter-list search matches beyond what the search box says, and whether `total` changes when `q` is set.
+5. What `page=0` or a page past the last one returns.
+6. The response fields of the transformer, location and energy endpoints.
+7. What the three per-meter URLs return for a meter that does not exist. The code treats a 404 as "not found".
+8. Whether `__data.json` works without `?x-sveltekit-invalidated=001`.
+9. Rate limits.
